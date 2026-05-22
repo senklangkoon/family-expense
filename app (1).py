@@ -1,10 +1,8 @@
 import streamlit as st
 import pandas as pd
-import json
-import os
-import base64
 from datetime import date, datetime
 from pathlib import Path
+from streamlit_gsheets import GSheetsConnection
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -14,9 +12,23 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-DATA_FILE = "expenses.json"
+WORKSHEET = "Data"  # ชื่อแท็บใน Google Sheets
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+# ลำดับคอลัมน์ A→J ตามที่กำหนด
+COLUMNS = [
+    "หมายเลขใบเสร็จ / ใบกำกับ",  # A
+    "ชื่ออุปกรณ์ / วัสดุ",          # B
+    "ยี่ห้อ",                       # C
+    "ร้านค้า / แหล่งซื้อ",          # D
+    "วันที่ซื้อ",                   # E
+    "ราคาต่อหน่วย (บาท)",          # F
+    "จำนวน",                       # G
+    "ราคารวม",                     # H
+    "หมวดหมู่วัสดุ",               # I
+    "หมายเหตุ",                    # J
+]
 
 CATEGORIES = [
     "🏗️ งานโครงสร้าง",
@@ -28,16 +40,45 @@ CATEGORIES = [
     "👷 ค่าแรงงาน",
 ]
 
-# ─── Data helpers ──────────────────────────────────────────────────────────────
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+# ─── Google Sheets connection ──────────────────────────────────────────────────
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-def save_data(records):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+@st.cache_data(ttl=10)
+def load_data():
+    """ดึงข้อมูลจาก Google Sheets แท็บ Data"""
+    try:
+        df = conn.read(worksheet=WORKSHEET, ttl=5)
+        if df is None or df.empty:
+            return pd.DataFrame(columns=COLUMNS)
+        # ลบแถวว่าง
+        df = df.dropna(how="all")
+        # บังคับให้ทุกคอลัมน์ที่จำเป็นมีอยู่
+        for col in COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        return df[COLUMNS]
+    except Exception as e:
+        st.error(f"⚠️ เชื่อมต่อ Google Sheets ไม่ได้: {e}")
+        return pd.DataFrame(columns=COLUMNS)
+
+def append_row(record: dict):
+    """เพิ่มแถวใหม่ในแท็บ Data"""
+    df_old = load_data()
+    new_row = pd.DataFrame([{
+        "หมายเลขใบเสร็จ / ใบกำกับ": record["receipt_no"],
+        "ชื่ออุปกรณ์ / วัสดุ": record["name"],
+        "ยี่ห้อ": record["brand"],
+        "ร้านค้า / แหล่งซื้อ": record["store"],
+        "วันที่ซื้อ": record["date"],
+        "ราคาต่อหน่วย (บาท)": record["price"],
+        "จำนวน": record["quantity"],
+        "ราคารวม": record["total"],
+        "หมวดหมู่วัสดุ": record["category"],
+        "หมายเหตุ": record["note"],
+    }])
+    df_new = pd.concat([df_old, new_row], ignore_index=True)
+    conn.update(worksheet=WORKSHEET, data=df_new)
+    st.cache_data.clear()
 
 def save_image(uploaded_file):
     if uploaded_file is None:
@@ -48,19 +89,25 @@ def save_image(uploaded_file):
     return str(path)
 
 def get_autofill(receipt_no: str):
-    """ค้นหาข้อมูลล่าสุดของหมายเลขใบเสร็จ และคืนค่า brand, price, category"""
-    if not receipt_no.strip():
+    """ดึงข้อมูลล่าสุดของหมายเลขใบเสร็จเดียวกัน"""
+    if not receipt_no or not receipt_no.strip():
         return None
-    records = load_data()
-    matches = [r for r in records if r.get("receipt_no", "").strip() == receipt_no.strip()]
-    if not matches:
+    df = load_data()
+    if df.empty:
         return None
-    # เอาบันทึกล่าสุด
-    latest = sorted(matches, key=lambda r: r.get("created_at", ""), reverse=True)[0]
+    matches = df[df["หมายเลขใบเสร็จ / ใบกำกับ"].astype(str).str.strip() == receipt_no.strip()]
+    if matches.empty:
+        return None
+    latest = matches.iloc[-1]
+    try:
+        price = float(latest["ราคาต่อหน่วย (บาท)"])
+    except (ValueError, TypeError):
+        price = 0.0
     return {
-        "brand": latest.get("brand", ""),
-        "price": latest.get("price", 0.0),
-        "category": latest.get("category", CATEGORIES[0]),
+        "name": str(latest["ชื่ออุปกรณ์ / วัสดุ"]) if pd.notna(latest["ชื่ออุปกรณ์ / วัสดุ"]) else "",
+        "brand": str(latest["ยี่ห้อ"]) if pd.notna(latest["ยี่ห้อ"]) else "",
+        "price": price,
+        "category": str(latest["หมวดหมู่วัสดุ"]) if pd.notna(latest["หมวดหมู่วัสดุ"]) else CATEGORIES[0],
     }
 
 # ─── CSS ──────────────────────────────────────────────────────────────────────
@@ -104,7 +151,7 @@ header[data-testid="stHeader"] { display: none !important; }
 .nav-brand span { color: #e2e8f0; }
 
 .section-header {
-    font-size: 1.4rem;
+    font-size: 1.6rem;
     font-weight: 700;
     color: #f1f5f9;
     margin-bottom: 1.5rem;
@@ -113,21 +160,21 @@ header[data-testid="stHeader"] { display: none !important; }
     letter-spacing: -0.02em;
 }
 .section-sub {
-    font-size: 0.8rem;
+    font-size: 0.9rem;
     color: #64748b;
     font-weight: 400;
-    margin-left: 8px;
+    margin-left: 10px;
 }
 
 .field-label {
-    font-size: 0.78rem;
+    font-size: 1rem;
     font-weight: 600;
-    color: #94a3b8;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin-bottom: 6px;
+    color: #cbd5e1;
+    letter-spacing: 0.01em;
+    margin-bottom: 10px;
+    margin-top: 4px;
 }
-.required { color: #f87171; margin-left: 3px; }
+.required { color: #f87171; margin-left: 3px; font-size: 1.1rem; }
 
 .autofill-badge {
     display: inline-block;
@@ -145,37 +192,21 @@ header[data-testid="stHeader"] { display: none !important; }
 .stTextInput > div > div > input,
 .stSelectbox > div > div > div,
 .stTextArea textarea,
-.stNumberInput > div > div > input,
 .stDateInput > div > div > input {
     background: #0f1117 !important;
     border: 1px solid #2a3147 !important;
     border-radius: 8px !important;
     color: #e2e8f0 !important;
     font-family: 'IBM Plex Sans Thai', sans-serif !important;
-    font-size: 0.9rem !important;
-    padding: 10px 14px !important;
+    font-size: 1rem !important;
+    padding: 12px 16px !important;
     transition: border-color 0.2s !important;
 }
 .stTextInput > div > div > input:focus,
-.stTextArea textarea:focus,
-.stNumberInput > div > div > input:focus {
+.stTextArea textarea:focus {
     border-color: #7dd3fc !important;
     box-shadow: 0 0 0 3px rgba(125,211,252,0.1) !important;
 }
-
-.stNumberInput > div {
-    background: #0f1117 !important;
-    border: 1px solid #2a3147 !important;
-    border-radius: 8px !important;
-}
-.stNumberInput button {
-    background: #1e2535 !important;
-    color: #7dd3fc !important;
-    border: none !important;
-    font-size: 1.1rem !important;
-    font-weight: 700 !important;
-}
-.stNumberInput button:hover { background: #2a3147 !important; }
 
 .stButton > button {
     width: 100%;
@@ -204,7 +235,6 @@ header[data-testid="stHeader"] { display: none !important; }
     background: #0f1117 !important;
 }
 
-.metric-row { display: flex; gap: 16px; margin-bottom: 1.5rem; flex-wrap: wrap; }
 .metric-card {
     flex: 1;
     min-width: 160px;
@@ -230,22 +260,27 @@ header[data-testid="stHeader"] { display: none !important; }
 }
 .metric-unit { font-size: 0.8rem; color: #64748b; margin-left: 4px; }
 
+/* ── TOTAL preview (ราคารวม) ── */
 .total-preview {
     background: #0f1117;
     border: 1px solid #2a3147;
     border-radius: 10px;
-    padding: 16px 20px;
+    padding: 18px 24px;
     margin: 1rem 0;
     display: flex;
     justify-content: space-between;
     align-items: center;
 }
-.total-label { color: #64748b; font-size: 0.85rem; }
+.total-label {
+    color: #cbd5e1;
+    font-size: 1.05rem;
+    font-weight: 600;
+}
 .total-value {
-    color: #34d399;
-    font-size: 1.5rem;
-    font-weight: 700;
+    font-size: 2rem;
+    font-weight: 800;
     font-family: 'IBM Plex Mono', monospace;
+    letter-spacing: -0.02em;
 }
 
 .stDataFrame { border: 1px solid #2a3147 !important; border-radius: 12px !important; overflow: hidden !important; }
@@ -282,22 +317,20 @@ header[data-testid="stHeader"] { display: none !important; }
     border-color: #2a3147 !important;
 }
 
-div[data-testid="stForm"] { background: transparent !important; border: none !important; padding: 0 !important; }
-
-/* ── Numeric inputs (ราคา + จำนวน) — ใหญ่แบบเครื่องคิดเลข ── */
-div[data-testid="stTextInput"]:has(input[aria-label="ราคา"]) input,
-div[data-testid="stTextInput"]:has(input[aria-label="จำนวน"]) input {
+/* ── ราคา/จำนวน — ตัวเลขใหญ่แบบเครื่องคิดเลข ── */
+input[aria-label="ราคา"],
+input[aria-label="จำนวน"] {
     font-family: 'IBM Plex Mono', monospace !important;
     font-size: 1.4rem !important;
     font-weight: 600 !important;
     text-align: right !important;
     padding: 14px 18px !important;
-    letter-spacing: 0.02em !important;
     color: #7dd3fc !important;
 }
 </style>
+
 <script>
-// บังคับให้ช่องราคา/จำนวน เปิด numeric keypad บนมือถือ
+// บังคับให้เปิด numeric keypad บนมือถือ
 (function() {
     const setNumeric = () => {
         document.querySelectorAll('input[aria-label="ราคา"], input[aria-label="จำนวน"]').forEach(el => {
@@ -310,10 +343,6 @@ div[data-testid="stTextInput"]:has(input[aria-label="จำนวน"]) input {
     new MutationObserver(setNumeric).observe(document.body, { childList: true, subtree: true });
 })();
 </script>
-<style>
-/* spacer to close style tag properly */
-.spacer-noop { display: none; }
-</style>
 """, unsafe_allow_html=True)
 
 # ─── NAV ──────────────────────────────────────────────────────────────────────
@@ -338,7 +367,7 @@ tab1, tab2 = st.tabs(["➕  เพิ่มรายการ", "📊  ตาร
 with tab1:
     st.markdown('<div class="section-header">บันทึกรายจ่ายใหม่ <span class="section-sub">กรอกข้อมูลแล้วกด บันทึก</span></div>', unsafe_allow_html=True)
 
-    # ── หมายเลขใบเสร็จ (autofill trigger) ─────────────────────────────────────
+    # ── หมายเลขใบเสร็จ ────────────────────────────────────────────────────────
     st.markdown('<div class="field-label">หมายเลขใบเสร็จ / ใบกำกับ</div>', unsafe_allow_html=True)
     receipt_no_input = st.text_input(
         "หมายเลขใบเสร็จ",
@@ -347,6 +376,7 @@ with tab1:
         key="receipt_no_field",
     )
 
+    # autofill เมื่อเลขใบเสร็จเปลี่ยน
     if receipt_no_input != st.session_state.last_receipt_no:
         st.session_state.last_receipt_no = receipt_no_input
         st.session_state.autofill = get_autofill(receipt_no_input)
@@ -357,8 +387,9 @@ with tab1:
             f'<div style="margin-bottom:0.75rem">'
             f'<span class="autofill-badge">✨ Autofill จากบันทึกก่อนหน้า</span>'
             f'<span style="color:#64748b; font-size:0.8rem; margin-left:8px;">'
+            f'ชื่อ: <b style="color:#cbd5e1">{af["name"] or "-"}</b> · '
             f'ยี่ห้อ: <b style="color:#cbd5e1">{af["brand"] or "-"}</b> · '
-            f'ราคา/หน่วย: <b style="color:#cbd5e1">฿{af["price"]:,.2f}</b> · '
+            f'ราคา: <b style="color:#cbd5e1">฿{af["price"]:,.2f}</b> · '
             f'หมวด: <b style="color:#cbd5e1">{af["category"]}</b>'
             f'</span></div>',
             unsafe_allow_html=True,
@@ -370,7 +401,8 @@ with tab1:
     col1, col2 = st.columns(2)
     with col1:
         st.markdown('<div class="field-label">ชื่ออุปกรณ์ / วัสดุ <span class="required">*</span></div>', unsafe_allow_html=True)
-        name = st.text_input("ชื่อ", placeholder="เช่น ปูนซีเมนต์, โต๊ะ, หลอดไฟ", label_visibility="collapsed", key="name_field")
+        name_default = af["name"] if af else ""
+        name = st.text_input("ชื่อ", value=name_default, placeholder="เช่น ปูนซีเมนต์, โต๊ะ, หลอดไฟ", label_visibility="collapsed", key="name_field")
     with col2:
         st.markdown('<div class="field-label">ยี่ห้อ</div>', unsafe_allow_html=True)
         brand_default = af["brand"] if af else ""
@@ -389,19 +421,15 @@ with tab1:
             format="DD/MM/YYYY", key="date_field",
         )
 
-    # ── ราคา + จำนวน (Real-time, ไม่มีปุ่ม +/-) ───────────────────────────────
+    # ── ราคา + จำนวน (text_input → numeric keypad บนมือถือ) ───────────────────
     col5, col6 = st.columns(2)
     with col5:
         st.markdown('<div class="field-label">ราคาต่อหน่วย (บาท) <span class="required">*</span></div>', unsafe_allow_html=True)
         price_default = f"{float(af['price']):.2f}" if af else ""
         price_str = st.text_input(
-            "ราคา",
-            value=price_default,
-            placeholder="0.00",
-            label_visibility="collapsed",
-            key="price_field",
+            "ราคา", value=price_default, placeholder="0.00",
+            label_visibility="collapsed", key="price_field",
         )
-        # parse ตัวเลข - ตัด comma/space ออก
         try:
             price = float(price_str.replace(",", "").replace(" ", "")) if price_str.strip() else 0.0
         except ValueError:
@@ -411,11 +439,8 @@ with tab1:
     with col6:
         st.markdown('<div class="field-label">จำนวน <span class="required">*</span></div>', unsafe_allow_html=True)
         qty_str = st.text_input(
-            "จำนวน",
-            value="1",
-            placeholder="1",
-            label_visibility="collapsed",
-            key="qty_field",
+            "จำนวน", value="1", placeholder="1",
+            label_visibility="collapsed", key="qty_field",
         )
         try:
             quantity = int(float(qty_str.replace(",", "").replace(" ", ""))) if qty_str.strip() else 1
@@ -430,10 +455,8 @@ with tab1:
     color = "#34d399" if total_preview > 0 else "#4a5568"
     st.markdown(f"""
     <div class="total-preview">
-        <div class="total-label" style="font-size:1rem; font-weight:600;">ราคารวม</div>
-        <div class="total-value" style="color:{color}; font-size:1.8rem;">
-            ฿{total_preview:,.2f}
-        </div>
+        <div class="total-label">ราคารวม</div>
+        <div class="total-value" style="color:{color};">฿{total_preview:,.2f}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -464,9 +487,8 @@ with tab1:
         elif price <= 0:
             st.error("⚠️ กรุณากรอกราคาต่อหน่วย")
         else:
-            receipt_path = save_image(receipt_img)
+            save_image(receipt_img)  # เก็บไฟล์ในเซิร์ฟเวอร์ (ชั่วคราว)
             record = {
-                "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
                 "receipt_no": receipt_no_input.strip(),
                 "name": name.strip(),
                 "brand": brand.strip(),
@@ -477,25 +499,24 @@ with tab1:
                 "total": float(price) * int(quantity),
                 "category": category,
                 "note": note.strip(),
-                "receipt": receipt_path,
-                "created_at": datetime.now().isoformat(),
             }
-            records = load_data()
-            records.append(record)
-            save_data(records)
-            # reset autofill + form
-            st.session_state.autofill = None
-            st.session_state.last_receipt_no = ""
-            st.success(f"✅ บันทึกรายการ **{name}** เรียบร้อย! ยอดรวม ฿{price * quantity:,.2f}")
-            st.balloons()
+            try:
+                with st.spinner("กำลังบันทึกลง Google Sheets..."):
+                    append_row(record)
+                st.session_state.autofill = None
+                st.session_state.last_receipt_no = ""
+                st.success(f"✅ บันทึก **{name}** ลง Google Sheets เรียบร้อย! ยอดรวม ฿{price * quantity:,.2f}")
+                st.balloons()
+            except Exception as e:
+                st.error(f"❌ บันทึกไม่สำเร็จ: {e}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — TABLE
 # ══════════════════════════════════════════════════════════════════════════════
 with tab2:
-    records = load_data()
+    df = load_data()
 
-    if not records:
+    if df.empty:
         st.markdown("""
         <div style="text-align:center; padding:60px 20px;">
             <div style="font-size:3rem; margin-bottom:12px;">📭</div>
@@ -504,16 +525,17 @@ with tab2:
         </div>
         """, unsafe_allow_html=True)
     else:
-        df = pd.DataFrame(records)
-        df["date"] = pd.to_datetime(df["date"])
-        if "receipt_no" not in df.columns:
-            df["receipt_no"] = ""
+        # แปลง type
+        df["ราคาต่อหน่วย (บาท)"] = pd.to_numeric(df["ราคาต่อหน่วย (บาท)"], errors="coerce").fillna(0)
+        df["จำนวน"] = pd.to_numeric(df["จำนวน"], errors="coerce").fillna(0).astype(int)
+        df["ราคารวม"] = pd.to_numeric(df["ราคารวม"], errors="coerce").fillna(0)
+        df["วันที่ซื้อ"] = pd.to_datetime(df["วันที่ซื้อ"], errors="coerce")
 
         # ── METRICS ───────────────────────────────────────────────────────
-        total_all = df["total"].sum()
+        total_all = df["ราคารวม"].sum()
         total_items = len(df)
-        avg_price = df["price"].mean()
-        top_cat = df.groupby("category")["total"].sum().idxmax() if len(df) > 0 else "-"
+        avg_price = df["ราคาต่อหน่วย (บาท)"].mean()
+        top_cat = df.groupby("หมวดหมู่วัสดุ")["ราคารวม"].sum().idxmax() if len(df) > 0 else "-"
 
         m1, m2, m3, m4 = st.columns(4)
         with m1:
@@ -534,7 +556,7 @@ with tab2:
         with m4:
             st.markdown(f"""<div class="metric-card">
                 <div class="metric-label">หมวดหมู่สูงสุด</div>
-                <div class="metric-value" style="font-size:0.9rem">{top_cat.split(' ',1)[-1] if top_cat != '-' else '-'}</div>
+                <div class="metric-value" style="font-size:0.9rem">{str(top_cat).split(' ',1)[-1] if top_cat != '-' else '-'}</div>
             </div>""", unsafe_allow_html=True)
 
         st.markdown("<div style='margin-top:1.5rem'></div>", unsafe_allow_html=True)
@@ -545,106 +567,75 @@ with tab2:
             with fc1:
                 search = st.text_input("🔎 ค้นหาชื่อ / ร้านค้า / เลขใบเสร็จ", placeholder="พิมพ์เพื่อค้นหา...")
             with fc2:
-                all_cats = sorted(df["category"].unique().tolist())
+                all_cats = sorted([c for c in df["หมวดหมู่วัสดุ"].dropna().unique() if c])
                 cat_filter = st.multiselect("📂 หมวดหมู่", options=all_cats, default=[])
             with fc3:
-                date_range = st.date_input(
-                    "📅 ช่วงวันที่",
-                    value=(df["date"].min().date(), df["date"].max().date()),
-                    min_value=df["date"].min().date(),
-                    max_value=df["date"].max().date(),
-                )
-
-            fc4, fc5 = st.columns(2)
-            with fc4:
-                price_min, price_max = float(df["price"].min()), float(df["price"].max())
-                if price_min < price_max:
-                    price_range = st.slider("💰 ช่วงราคาต่อหน่วย (บาท)", min_value=price_min, max_value=price_max,
-                                            value=(price_min, price_max), format="฿%.0f")
+                valid_dates = df["วันที่ซื้อ"].dropna()
+                if not valid_dates.empty:
+                    date_range = st.date_input(
+                        "📅 ช่วงวันที่",
+                        value=(valid_dates.min().date(), valid_dates.max().date()),
+                        min_value=valid_dates.min().date(),
+                        max_value=valid_dates.max().date(),
+                    )
                 else:
-                    price_range = (price_min, price_max)
-            with fc5:
-                stores = ["ทั้งหมด"] + sorted(df["store"].fillna("").unique().tolist())
-                store_filter = st.selectbox("🏪 ร้านค้า", options=stores)
+                    date_range = ()
 
         # ── APPLY FILTERS ─────────────────────────────────────────────────
         filtered = df.copy()
-
         if search:
             mask = (
-                filtered["name"].str.contains(search, case=False, na=False) |
-                filtered["store"].str.contains(search, case=False, na=False) |
-                filtered["brand"].str.contains(search, case=False, na=False) |
-                filtered["receipt_no"].str.contains(search, case=False, na=False)
+                filtered["ชื่ออุปกรณ์ / วัสดุ"].astype(str).str.contains(search, case=False, na=False) |
+                filtered["ร้านค้า / แหล่งซื้อ"].astype(str).str.contains(search, case=False, na=False) |
+                filtered["ยี่ห้อ"].astype(str).str.contains(search, case=False, na=False) |
+                filtered["หมายเลขใบเสร็จ / ใบกำกับ"].astype(str).str.contains(search, case=False, na=False)
             )
             filtered = filtered[mask]
 
         if cat_filter:
-            filtered = filtered[filtered["category"].isin(cat_filter)]
+            filtered = filtered[filtered["หมวดหมู่วัสดุ"].isin(cat_filter)]
 
-        if len(date_range) == 2:
+        if isinstance(date_range, tuple) and len(date_range) == 2:
             start_d, end_d = date_range
             filtered = filtered[
-                (filtered["date"].dt.date >= start_d) &
-                (filtered["date"].dt.date <= end_d)
+                (filtered["วันที่ซื้อ"].dt.date >= start_d) &
+                (filtered["วันที่ซื้อ"].dt.date <= end_d)
             ]
 
-        filtered = filtered[
-            (filtered["price"] >= price_range[0]) &
-            (filtered["price"] <= price_range[1])
-        ]
-
-        if store_filter != "ทั้งหมด":
-            filtered = filtered[filtered["store"] == store_filter]
-
-        # ── SORT ──────────────────────────────────────────────────────────
-        sc1, sc2, sc3 = st.columns([2, 1, 1])
+        # ── DISPLAY ──────────────────────────────────────────────────────
+        sc1, sc2 = st.columns([3, 1])
         with sc1:
             st.markdown(f"<div style='color:#64748b; font-size:0.85rem; padding-top:8px'>แสดง <b style='color:#e2e8f0'>{len(filtered)}</b> จาก {len(df)} รายการ</div>", unsafe_allow_html=True)
         with sc2:
-            sort_col = st.selectbox("เรียงตาม", ["date", "name", "price", "total", "category", "receipt_no"], label_visibility="collapsed")
-        with sc3:
-            sort_asc = st.selectbox("ลำดับ", ["ใหม่→เก่า / มาก→น้อย", "เก่า→ใหม่ / น้อย→มาก"], label_visibility="collapsed")
+            if st.button("🔄  รีเฟรชข้อมูล", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
 
-        ascending = sort_asc == "เก่า→ใหม่ / น้อย→มาก"
-        filtered = filtered.sort_values(sort_col, ascending=ascending)
-
-        # ── DISPLAY TABLE ─────────────────────────────────────────────────
-        display_df = filtered[[
-            "receipt_no", "date", "name", "brand", "store",
-            "category", "price", "quantity", "total", "note"
-        ]].copy()
-
-        display_df.columns = [
-            "เลขใบเสร็จ", "วันที่", "ชื่ออุปกรณ์/วัสดุ", "ยี่ห้อ", "ร้านค้า",
-            "หมวดหมู่", "ราคา/หน่วย", "จำนวน", "ราคารวม (บาท)", "หมายเหตุ"
-        ]
-        display_df["วันที่"] = display_df["วันที่"].dt.strftime("%d/%m/%Y")
-        display_df["ราคา/หน่วย"] = display_df["ราคา/หน่วย"].apply(lambda x: f"฿{x:,.2f}")
-        display_df["ราคารวม (บาท)"] = display_df["ราคารวม (บาท)"].apply(lambda x: f"฿{x:,.2f}")
+        display_df = filtered.copy()
+        if "วันที่ซื้อ" in display_df.columns:
+            display_df["วันที่ซื้อ"] = display_df["วันที่ซื้อ"].dt.strftime("%d/%m/%Y").fillna("")
+        display_df["ราคาต่อหน่วย (บาท)"] = display_df["ราคาต่อหน่วย (บาท)"].apply(lambda x: f"฿{x:,.2f}")
+        display_df["ราคารวม"] = display_df["ราคารวม"].apply(lambda x: f"฿{x:,.2f}")
 
         st.dataframe(display_df, use_container_width=True, height=480, hide_index=True)
 
         # ── EXPORT ────────────────────────────────────────────────────────
         st.markdown("<div style='margin-top: 1rem'></div>", unsafe_allow_html=True)
-        ex1, ex2 = st.columns(2)
-        with ex1:
-            csv = filtered.drop(columns=["id", "created_at", "receipt"], errors="ignore").to_csv(index=False, encoding="utf-8-sig")
-            st.download_button("⬇️  Export CSV", data=csv,
-                               file_name=f"expenses_{datetime.now().strftime('%Y%m%d')}.csv",
-                               mime="text/csv", use_container_width=True)
-        with ex2:
-            if st.button("🗑️  ล้างตัวกรองทั้งหมด", use_container_width=True):
-                st.rerun()
+        csv = filtered.to_csv(index=False, encoding="utf-8-sig")
+        st.download_button(
+            "⬇️  Export CSV", data=csv,
+            file_name=f"expenses_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv", use_container_width=True,
+        )
 
         # ── CHART ─────────────────────────────────────────────────────────
         if len(filtered) > 0:
             st.markdown("<div style='margin-top:2rem'></div>", unsafe_allow_html=True)
             st.markdown('<div class="section-header">📈 สรุปค่าใช้จ่ายตามหมวดหมู่</div>', unsafe_allow_html=True)
             cat_summary = (
-                filtered.groupby("category")["total"]
+                filtered.groupby("หมวดหมู่วัสดุ")["ราคารวม"]
                 .sum().reset_index()
-                .rename(columns={"category": "หมวดหมู่", "total": "ยอดรวม (บาท)"})
+                .rename(columns={"ราคารวม": "ยอดรวม (บาท)"})
                 .sort_values("ยอดรวม (บาท)", ascending=False)
             )
-            st.bar_chart(cat_summary.set_index("หมวดหมู่"), color="#7dd3fc", height=300)
+            st.bar_chart(cat_summary.set_index("หมวดหมู่วัสดุ"), color="#7dd3fc", height=300)
