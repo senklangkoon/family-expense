@@ -283,6 +283,36 @@ header[data-testid="stHeader"] { display: none !important; }
 }
 
 div[data-testid="stForm"] { background: transparent !important; border: none !important; padding: 0 !important; }
+
+/* ── Numeric inputs (ราคา + จำนวน) — ใหญ่แบบเครื่องคิดเลข ── */
+div[data-testid="stTextInput"]:has(input[aria-label="ราคา"]) input,
+div[data-testid="stTextInput"]:has(input[aria-label="จำนวน"]) input {
+    font-family: 'IBM Plex Mono', monospace !important;
+    font-size: 1.4rem !important;
+    font-weight: 600 !important;
+    text-align: right !important;
+    padding: 14px 18px !important;
+    letter-spacing: 0.02em !important;
+    color: #7dd3fc !important;
+}
+</style>
+<script>
+// บังคับให้ช่องราคา/จำนวน เปิด numeric keypad บนมือถือ
+(function() {
+    const setNumeric = () => {
+        document.querySelectorAll('input[aria-label="ราคา"], input[aria-label="จำนวน"]').forEach(el => {
+            el.setAttribute('inputmode', 'decimal');
+            el.setAttribute('pattern', '[0-9]*');
+            el.setAttribute('autocomplete', 'off');
+        });
+    };
+    setNumeric();
+    new MutationObserver(setNumeric).observe(document.body, { childList: true, subtree: true });
+})();
+</script>
+<style>
+/* spacer to close style tag properly */
+.spacer-noop { display: none; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -308,7 +338,7 @@ tab1, tab2 = st.tabs(["➕  เพิ่มรายการ", "📊  ตาร
 with tab1:
     st.markdown('<div class="section-header">บันทึกรายจ่ายใหม่ <span class="section-sub">กรอกข้อมูลแล้วกด บันทึก</span></div>', unsafe_allow_html=True)
 
-    # ── AUTOFILL ZONE (นอก form เพื่อให้ rerun ได้ทันที) ──────────────────────
+    # ── หมายเลขใบเสร็จ (autofill trigger) ─────────────────────────────────────
     st.markdown('<div class="field-label">หมายเลขใบเสร็จ / ใบกำกับ</div>', unsafe_allow_html=True)
     receipt_no_input = st.text_input(
         "หมายเลขใบเสร็จ",
@@ -317,11 +347,9 @@ with tab1:
         key="receipt_no_field",
     )
 
-    # ตรวจว่าเลขใบเสร็จเปลี่ยนไหม → autofill
     if receipt_no_input != st.session_state.last_receipt_no:
         st.session_state.last_receipt_no = receipt_no_input
-        result = get_autofill(receipt_no_input)
-        st.session_state.autofill = result
+        st.session_state.autofill = get_autofill(receipt_no_input)
 
     af = st.session_state.autofill
     if af:
@@ -338,113 +366,128 @@ with tab1:
 
     st.markdown("<div style='margin-bottom:0.5rem'></div>", unsafe_allow_html=True)
 
-    # ── FORM ───────────────────────────────────────────────────────────────────
-    with st.form("expense_form", clear_on_submit=True):
+    # ── ชื่อ + ยี่ห้อ ──────────────────────────────────────────────────────────
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown('<div class="field-label">ชื่ออุปกรณ์ / วัสดุ <span class="required">*</span></div>', unsafe_allow_html=True)
+        name = st.text_input("ชื่อ", placeholder="เช่น ปูนซีเมนต์, โต๊ะ, หลอดไฟ", label_visibility="collapsed", key="name_field")
+    with col2:
+        st.markdown('<div class="field-label">ยี่ห้อ</div>', unsafe_allow_html=True)
+        brand_default = af["brand"] if af else ""
+        brand = st.text_input("ยี่ห้อ", value=brand_default, placeholder="เช่น SCG, IKEA, Philips", label_visibility="collapsed", key="brand_field")
 
-        # ── ชื่อ + ยี่ห้อ ──────────────────────────────────────────────────
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown('<div class="field-label">ชื่ออุปกรณ์ / วัสดุ <span class="required">*</span></div>', unsafe_allow_html=True)
-            name = st.text_input("ชื่อ", placeholder="เช่น ปูนซีเมนต์, โต๊ะ, หลอดไฟ", label_visibility="collapsed")
-        with col2:
-            st.markdown('<div class="field-label">ยี่ห้อ</div>', unsafe_allow_html=True)
-            brand_default = af["brand"] if af else ""
-            brand = st.text_input("ยี่ห้อ", value=brand_default, placeholder="เช่น SCG, IKEA, Philips", label_visibility="collapsed")
+    # ── ร้านค้า + วันที่ ───────────────────────────────────────────────────────
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown('<div class="field-label">ร้านค้า / แหล่งซื้อ</div>', unsafe_allow_html=True)
+        store = st.text_input("ร้านค้า", placeholder="เช่น HomePro, Lazada, ตลาดนัด", label_visibility="collapsed", key="store_field")
+    with col4:
+        st.markdown('<div class="field-label">วันที่ซื้อ <span class="required">*</span></div>', unsafe_allow_html=True)
+        purchase_date = st.date_input(
+            "วันที่", value=date.today(), label_visibility="collapsed",
+            min_value=date(2000, 1, 1), max_value=date(2099, 12, 31),
+            format="DD/MM/YYYY", key="date_field",
+        )
 
-        # ── ร้านค้า + วันที่ ───────────────────────────────────────────────
-        col3, col4 = st.columns(2)
-        with col3:
-            st.markdown('<div class="field-label">ร้านค้า / แหล่งซื้อ</div>', unsafe_allow_html=True)
-            store = st.text_input("ร้านค้า", placeholder="เช่น HomePro, Lazada, ตลาดนัด", label_visibility="collapsed")
-        with col4:
-            st.markdown('<div class="field-label">วันที่ซื้อ <span class="required">*</span></div>', unsafe_allow_html=True)
-            purchase_date = st.date_input(
-                "วันที่", value=date.today(), label_visibility="collapsed",
-                min_value=date(2000, 1, 1), max_value=date(2099, 12, 31),
-                format="DD/MM/YYYY",
-            )
+    # ── ราคา + จำนวน (Real-time, ไม่มีปุ่ม +/-) ───────────────────────────────
+    col5, col6 = st.columns(2)
+    with col5:
+        st.markdown('<div class="field-label">ราคาต่อหน่วย (บาท) <span class="required">*</span></div>', unsafe_allow_html=True)
+        price_default = f"{float(af['price']):.2f}" if af else ""
+        price_str = st.text_input(
+            "ราคา",
+            value=price_default,
+            placeholder="0.00",
+            label_visibility="collapsed",
+            key="price_field",
+        )
+        # parse ตัวเลข - ตัด comma/space ออก
+        try:
+            price = float(price_str.replace(",", "").replace(" ", "")) if price_str.strip() else 0.0
+        except ValueError:
+            price = 0.0
+            st.caption(":red[⚠️ กรุณากรอกตัวเลขเท่านั้น]")
 
-        # ── ราคา + จำนวน ──────────────────────────────────────────────────
-        col5, col6 = st.columns(2)
-        with col5:
-            st.markdown('<div class="field-label">ราคาต่อหน่วย (บาท) <span class="required">*</span></div>', unsafe_allow_html=True)
-            price_default = float(af["price"]) if af else 0.0
-            price = st.number_input(
-                "ราคา", min_value=0.0, step=1.0, format="%.2f",
-                value=price_default, label_visibility="collapsed",
-            )
-        with col6:
-            st.markdown('<div class="field-label">จำนวน <span class="required">*</span></div>', unsafe_allow_html=True)
-            quantity = st.number_input("จำนวน", min_value=1, max_value=9999, step=1, value=1, label_visibility="collapsed")
+    with col6:
+        st.markdown('<div class="field-label">จำนวน <span class="required">*</span></div>', unsafe_allow_html=True)
+        qty_str = st.text_input(
+            "จำนวน",
+            value="1",
+            placeholder="1",
+            label_visibility="collapsed",
+            key="qty_field",
+        )
+        try:
+            quantity = int(float(qty_str.replace(",", "").replace(" ", ""))) if qty_str.strip() else 1
+            if quantity < 1:
+                quantity = 1
+        except ValueError:
+            quantity = 1
+            st.caption(":red[⚠️ กรุณากรอกตัวเลขเท่านั้น]")
 
-        # ── ยอดรวม real-time ──────────────────────────────────────────────
-        total_preview = price * quantity
-        color = "#34d399" if total_preview > 0 else "#4a5568"
-        st.markdown(f"""
-        <div class="total-preview">
-            <div>
-                <div class="total-label">ราคารวม (ราคาต่อหน่วย × จำนวน)</div>
-                <div style="color:#64748b; font-size:0.75rem; margin-top:2px;">
-                    ฿{price:,.2f} × {int(quantity)} หน่วย
-                </div>
-            </div>
-            <div class="total-value" style="color:{color};">
-                ฿{total_preview:,.2f}
-            </div>
+    # ── ราคารวม real-time (เฉพาะคำว่า "ราคารวม" + ตัวเลขสีเขียวใหญ่) ─────────
+    total_preview = price * quantity
+    color = "#34d399" if total_preview > 0 else "#4a5568"
+    st.markdown(f"""
+    <div class="total-preview">
+        <div class="total-label" style="font-size:1rem; font-weight:600;">ราคารวม</div>
+        <div class="total-value" style="color:{color}; font-size:1.8rem;">
+            ฿{total_preview:,.2f}
         </div>
-        """, unsafe_allow_html=True)
+    </div>
+    """, unsafe_allow_html=True)
 
-        # ── หมวดหมู่ ──────────────────────────────────────────────────────
-        st.markdown('<div class="field-label">หมวดหมู่วัสดุ <span class="required">*</span></div>', unsafe_allow_html=True)
-        cat_options = ["— เลือกหมวดหมู่ —"] + CATEGORIES
-        cat_default_idx = 0
-        if af and af["category"] in CATEGORIES:
-            cat_default_idx = cat_options.index(af["category"])
-        category = st.selectbox("หมวดหมู่", options=cat_options, index=cat_default_idx, label_visibility="collapsed")
+    # ── หมวดหมู่ ───────────────────────────────────────────────────────────────
+    st.markdown('<div class="field-label">หมวดหมู่วัสดุ <span class="required">*</span></div>', unsafe_allow_html=True)
+    cat_options = ["— เลือกหมวดหมู่ —"] + CATEGORIES
+    cat_default_idx = 0
+    if af and af["category"] in CATEGORIES:
+        cat_default_idx = cat_options.index(af["category"])
+    category = st.selectbox("หมวดหมู่", options=cat_options, index=cat_default_idx, label_visibility="collapsed", key="cat_field")
 
-        # ── หมายเหตุ ──────────────────────────────────────────────────────
-        st.markdown('<div class="field-label" style="margin-top:1rem">หมายเหตุ</div>', unsafe_allow_html=True)
-        note = st.text_area("หมายเหตุ", placeholder="รายละเอียดเพิ่มเติม...", height=80, label_visibility="collapsed")
+    # ── หมายเหตุ ───────────────────────────────────────────────────────────────
+    st.markdown('<div class="field-label" style="margin-top:1rem">หมายเหตุ</div>', unsafe_allow_html=True)
+    note = st.text_area("หมายเหตุ", placeholder="รายละเอียดเพิ่มเติม...", height=80, label_visibility="collapsed", key="note_field")
 
-        # ── รูปใบเสร็จ ────────────────────────────────────────────────────
-        st.markdown('<div class="field-label" style="margin-top:1rem">รูปถ่ายใบเสร็จ</div>', unsafe_allow_html=True)
-        receipt_img = st.file_uploader("รูปใบเสร็จ", type=["jpg", "jpeg", "png", "webp", "pdf"], label_visibility="collapsed")
+    # ── รูปใบเสร็จ ─────────────────────────────────────────────────────────────
+    st.markdown('<div class="field-label" style="margin-top:1rem">รูปถ่ายใบเสร็จ</div>', unsafe_allow_html=True)
+    receipt_img = st.file_uploader("รูปใบเสร็จ", type=["jpg", "jpeg", "png", "webp", "pdf"], label_visibility="collapsed", key="img_field")
 
-        st.markdown("<div style='margin-top:0.5rem'></div>", unsafe_allow_html=True)
-        submitted = st.form_submit_button("💾  บันทึกรายการ", use_container_width=True)
+    st.markdown("<div style='margin-top:0.5rem'></div>", unsafe_allow_html=True)
+    submitted = st.button("💾  บันทึกรายการ", use_container_width=True, type="primary")
 
-        if submitted:
-            if not name.strip():
-                st.error("⚠️ กรุณากรอกชื่ออุปกรณ์ / วัสดุ")
-            elif category == "— เลือกหมวดหมู่ —":
-                st.error("⚠️ กรุณาเลือกหมวดหมู่")
-            elif price <= 0:
-                st.error("⚠️ กรุณากรอกราคาต่อหน่วย")
-            else:
-                receipt_path = save_image(receipt_img)
-                record = {
-                    "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
-                    "receipt_no": receipt_no_input.strip(),
-                    "name": name.strip(),
-                    "brand": brand.strip(),
-                    "store": store.strip(),
-                    "date": str(purchase_date),
-                    "price": float(price),
-                    "quantity": int(quantity),
-                    "total": float(price) * int(quantity),
-                    "category": category,
-                    "note": note.strip(),
-                    "receipt": receipt_path,
-                    "created_at": datetime.now().isoformat(),
-                }
-                records = load_data()
-                records.append(record)
-                save_data(records)
-                # reset autofill
-                st.session_state.autofill = None
-                st.session_state.last_receipt_no = ""
-                st.success(f"✅ บันทึกรายการ **{name}** เรียบร้อย! ยอดรวม ฿{price * quantity:,.2f}")
-                st.balloons()
+    if submitted:
+        if not name.strip():
+            st.error("⚠️ กรุณากรอกชื่ออุปกรณ์ / วัสดุ")
+        elif category == "— เลือกหมวดหมู่ —":
+            st.error("⚠️ กรุณาเลือกหมวดหมู่")
+        elif price <= 0:
+            st.error("⚠️ กรุณากรอกราคาต่อหน่วย")
+        else:
+            receipt_path = save_image(receipt_img)
+            record = {
+                "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+                "receipt_no": receipt_no_input.strip(),
+                "name": name.strip(),
+                "brand": brand.strip(),
+                "store": store.strip(),
+                "date": str(purchase_date),
+                "price": float(price),
+                "quantity": int(quantity),
+                "total": float(price) * int(quantity),
+                "category": category,
+                "note": note.strip(),
+                "receipt": receipt_path,
+                "created_at": datetime.now().isoformat(),
+            }
+            records = load_data()
+            records.append(record)
+            save_data(records)
+            # reset autofill + form
+            st.session_state.autofill = None
+            st.session_state.last_receipt_no = ""
+            st.success(f"✅ บันทึกรายการ **{name}** เรียบร้อย! ยอดรวม ฿{price * quantity:,.2f}")
+            st.balloons()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — TABLE
